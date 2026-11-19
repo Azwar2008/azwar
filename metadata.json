@@ -1,0 +1,6 @@
+{
+  "name": "KertaHadir — Absensi PTPN Kertamanah",
+  "description": "Aplikasi absensi kantor mobile-first dan PWA untuk karyawan dan HRD Kebun Kertamanah PTPN dengan verifikasi GPS geofence, foto swafoto, pengajuan izin, dan rekap kehadiran real-time.",
+  "requestFramePermissions": ["geolocation", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

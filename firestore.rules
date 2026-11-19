@@ -1,0 +1,338 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core identity and path hardening helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Bootstrapped admin email check (zero DB read; safe in list queries)
+    function isAdminEmail() {
+      return isSignedIn() && request.auth.token.email == 'frogica36@gmail.com';
+    }
+
+    function isAdmin() {
+      return isAdminEmail() || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    // Validation blueprint: Employee
+    function isValidEmployeeData(data) {
+      return data.uid is string && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 150
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 100
+        && data.nip is string && data.nip.size() >= 3 && data.nip.size() <= 30 && data.nip.matches('^[a-zA-Z0-9.\\-]+$')
+        && data.division is string && data.division.size() >= 2 && data.division.size() <= 60
+        && data.division in [
+          'Tata Usaha & SDM',
+          'Tanaman & Lapangan',
+          'Teknik & Pengolahan',
+          'Keuangan & Akuntansi',
+          'Keamanan',
+          'Umum & Aset'
+        ]
+        && data.position is string && data.position.size() >= 2 && data.position.size() <= 80
+        && data.role is string && data.role.size() <= 20 && data.role in ['employee', 'admin']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEmployeeCreate(data) {
+      return data.keys().hasAll(['uid', 'email', 'fullName', 'nip', 'division', 'position', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'fullName', 'nip', 'division', 'position', 'role', 'createdAt', 'updatedAt'])
+        && isValidEmployeeData(data);
+    }
+
+    function isValidEmployeeUpdate(data) {
+      return data.keys().hasAll(['uid', 'email', 'fullName', 'nip', 'division', 'position', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'fullName', 'nip', 'division', 'position', 'role', 'createdAt', 'updatedAt'])
+        && isValidEmployeeData(data);
+    }
+
+    // Validation blueprint: AdminMarker
+    function isValidAdminMarker(data) {
+      return data.keys().hasAll(['uid', 'email', 'grantedAt', 'grantedBy'])
+        && data.keys().hasOnly(['uid', 'email', 'grantedAt', 'grantedBy'])
+        && data.uid is string && isValidId(data.uid)
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 150
+        && data.grantedAt is timestamp
+        && data.grantedBy is string && data.grantedBy.size() >= 1 && data.grantedBy.size() <= 128;
+    }
+
+    // Validation blueprint: OfficeSettings
+    function isValidOfficeSettings(data) {
+      return data.keys().hasAll([
+          'officeName', 'address', 'latitude', 'longitude', 'radiusMeters',
+          'workStartTime', 'workEndTime', 'lateToleranceMinutes', 'strictGeofence',
+          'updatedAt', 'updatedBy'
+        ])
+        && data.keys().hasOnly([
+          'officeName', 'address', 'latitude', 'longitude', 'radiusMeters',
+          'workStartTime', 'workEndTime', 'lateToleranceMinutes', 'strictGeofence',
+          'updatedAt', 'updatedBy'
+        ])
+        && data.officeName is string && data.officeName.size() >= 3 && data.officeName.size() <= 120
+        && data.address is string && data.address.size() >= 3 && data.address.size() <= 200
+        && (data.latitude is number) && data.latitude >= -90 && data.latitude <= 90
+        && (data.longitude is number) && data.longitude >= -180 && data.longitude <= 180
+        && (data.radiusMeters is number) && data.radiusMeters >= 20 && data.radiusMeters <= 5000
+        && data.workStartTime is string && data.workStartTime.size() == 5 && data.workStartTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && data.workEndTime is string && data.workEndTime.size() == 5 && data.workEndTime.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+        && (data.lateToleranceMinutes is number) && data.lateToleranceMinutes >= 0 && data.lateToleranceMinutes <= 120
+        && data.strictGeofence is bool
+        && data.updatedAt is timestamp
+        && data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128;
+    }
+
+    // Validation blueprint: AttendanceRecord
+    function isValidAttendanceBase(data) {
+      return data.uid is string && isValidId(data.uid)
+        && data.employeeName is string && data.employeeName.size() >= 2 && data.employeeName.size() <= 100
+        && data.employeeNip is string && data.employeeNip.size() >= 3 && data.employeeNip.size() <= 30
+        && data.division is string && data.division.size() >= 2 && data.division.size() <= 60
+        && data.dateKey is string && data.dateKey.size() == 10 && data.dateKey.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.checkInTime is timestamp
+        && (data.checkInLat is number) && data.checkInLat >= -90 && data.checkInLat <= 90
+        && (data.checkInLng is number) && data.checkInLng >= -180 && data.checkInLng <= 180
+        && (data.checkInDistanceMeters is number) && data.checkInDistanceMeters >= 0 && data.checkInDistanceMeters <= 20000000
+        && data.checkInPhoto is string && data.checkInPhoto.size() <= 80000
+        && data.checkInLocationType is string && data.checkInLocationType.size() <= 20 && data.checkInLocationType in ['office', 'field_duty']
+        && data.checkInNote is string && data.checkInNote.size() <= 300
+        && data.status is string && data.status.size() <= 20 && data.status in ['on_time', 'late', 'field_duty']
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAttendanceCreate(data) {
+      return data.keys().hasAll([
+          'uid', 'employeeName', 'employeeNip', 'division', 'dateKey',
+          'checkInTime', 'checkInLat', 'checkInLng', 'checkInDistanceMeters',
+          'checkInPhoto', 'checkInLocationType', 'checkInNote', 'status', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'employeeName', 'employeeNip', 'division', 'dateKey',
+          'checkInTime', 'checkInLat', 'checkInLng', 'checkInDistanceMeters',
+          'checkInPhoto', 'checkInLocationType', 'checkInNote', 'status', 'updatedAt'
+        ])
+        && isValidAttendanceBase(data);
+    }
+
+    function isValidAttendanceCheckOutFields(data) {
+      return data.checkOutTime is timestamp
+        && (data.checkOutLat is number) && data.checkOutLat >= -90 && data.checkOutLat <= 90
+        && (data.checkOutLng is number) && data.checkOutLng >= -180 && data.checkOutLng <= 180
+        && (data.checkOutDistanceMeters is number) && data.checkOutDistanceMeters >= 0 && data.checkOutDistanceMeters <= 20000000
+        && data.checkOutPhoto is string && data.checkOutPhoto.size() <= 80000
+        && data.checkOutNote is string && data.checkOutNote.size() <= 300
+        && (data.workDurationMinutes is number) && data.workDurationMinutes >= 0 && data.workDurationMinutes <= 1440;
+    }
+
+    function isValidAttendanceUpdate(data) {
+      return isValidAttendanceBase(data)
+        && (
+          (
+            data.keys().hasOnly([
+              'uid', 'employeeName', 'employeeNip', 'division', 'dateKey',
+              'checkInTime', 'checkInLat', 'checkInLng', 'checkInDistanceMeters',
+              'checkInPhoto', 'checkInLocationType', 'checkInNote', 'status', 'updatedAt'
+            ])
+            && isValidAttendanceCreate(data)
+          )
+          || (
+            data.keys().hasAll([
+              'uid', 'employeeName', 'employeeNip', 'division', 'dateKey',
+              'checkInTime', 'checkInLat', 'checkInLng', 'checkInDistanceMeters',
+              'checkInPhoto', 'checkInLocationType', 'checkInNote', 'status', 'updatedAt',
+              'checkOutTime', 'checkOutLat', 'checkOutLng', 'checkOutDistanceMeters',
+              'checkOutPhoto', 'checkOutNote', 'workDurationMinutes'
+            ])
+            && data.keys().hasOnly([
+              'uid', 'employeeName', 'employeeNip', 'division', 'dateKey',
+              'checkInTime', 'checkInLat', 'checkInLng', 'checkInDistanceMeters',
+              'checkInPhoto', 'checkInLocationType', 'checkInNote', 'status', 'updatedAt',
+              'checkOutTime', 'checkOutLat', 'checkOutLng', 'checkOutDistanceMeters',
+              'checkOutPhoto', 'checkOutNote', 'workDurationMinutes'
+            ])
+            && isValidAttendanceCheckOutFields(data)
+          )
+        );
+    }
+
+    // Validation blueprint: LeaveRequest
+    function isValidLeaveBase(data) {
+      return data.uid is string && isValidId(data.uid)
+        && data.employeeName is string && data.employeeName.size() >= 2 && data.employeeName.size() <= 100
+        && data.employeeNip is string && data.employeeNip.size() >= 3 && data.employeeNip.size() <= 30
+        && data.division is string && data.division.size() >= 2 && data.division.size() <= 60
+        && data.type is string && data.type.size() <= 20 && data.type in ['izin', 'sakit', 'cuti', 'dinas_luar']
+        && data.startDate is string && data.startDate.size() == 10 && data.startDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.endDate is string && data.endDate.size() == 10 && data.endDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 500
+        && data.status is string && data.status.size() <= 20 && data.status in ['pending', 'approved', 'rejected']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLeaveCreate(data) {
+      return data.keys().hasAll([
+          'uid', 'employeeName', 'employeeNip', 'division', 'type',
+          'startDate', 'endDate', 'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'employeeName', 'employeeNip', 'division', 'type',
+          'startDate', 'endDate', 'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && isValidLeaveBase(data);
+    }
+
+    function isValidLeaveUpdate(data) {
+      return data.keys().hasAll([
+          'uid', 'employeeName', 'employeeNip', 'division', 'type',
+          'startDate', 'endDate', 'reason', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'employeeName', 'employeeNip', 'division', 'type',
+          'startDate', 'endDate', 'reason', 'status', 'reviewerUid', 'reviewerNote', 'createdAt', 'updatedAt'
+        ])
+        && isValidLeaveBase(data)
+        && (!('reviewerUid' in data) || (data.reviewerUid is string && data.reviewerUid.size() <= 128))
+        && (!('reviewerNote' in data) || (data.reviewerNote is string && data.reviewerNote.size() <= 300));
+    }
+
+    // Collection: employees (PII isolated to owner and admin)
+    match /employees/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
+      allow list: if isAdminEmail() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isValidId(uid) && isOwner(uid)
+        && isValidEmployeeCreate(incoming())
+        && incoming().uid == uid
+        && incoming().email == request.auth.token.email
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (incoming().role == 'employee' || (isAdminEmail() && incoming().role == 'admin'));
+      allow update: if isValidId(uid) && isSignedIn()
+        && isValidEmployeeUpdate(incoming())
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            isOwner(uid)
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'nip', 'division', 'position', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(uid) && isAdmin();
+    }
+
+    // Collection: admins
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && (isOwner(uid) || isAdmin());
+      allow list: if isAdminEmail();
+      allow create: if isValidId(uid) && isAdminEmail()
+        && isValidAdminMarker(incoming())
+        && incoming().uid == uid
+        && incoming().grantedAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(uid) && isAdminEmail();
+    }
+
+    // Collection: settings (office geofence & schedule)
+    match /settings/{settingId} {
+      allow get: if isValidId(settingId) && isSignedIn();
+      allow list: if false;
+      allow create, update: if isValidId(settingId) && settingId == 'office'
+        && isAdmin()
+        && isValidOfficeSettings(incoming())
+        && incoming().updatedAt == request.time
+        && incoming().updatedBy == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // Collection: attendance
+    match /attendance/{recordId} {
+      allow get: if isValidId(recordId) && (isOwner(existing().uid) || isAdmin());
+      allow list: if isAdminEmail() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isValidId(recordId) && isSignedIn()
+        && isValidAttendanceCreate(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().checkInTime == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/employees/$(request.auth.uid));
+      allow update: if isValidId(recordId) && isSignedIn()
+        && isValidAttendanceUpdate(incoming())
+        && incoming().uid == existing().uid
+        && incoming().dateKey == existing().dateKey
+        && incoming().checkInTime == existing().checkInTime
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (
+            isOwner(existing().uid)
+            && !('checkOutTime' in existing())
+            && isValidAttendanceCheckOutFields(incoming())
+            && incoming().checkOutTime == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'checkOutTime', 'checkOutLat', 'checkOutLng', 'checkOutDistanceMeters',
+              'checkOutPhoto', 'checkOutNote', 'workDurationMinutes', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(recordId) && isAdmin();
+    }
+
+    // Collection: leaveRequests
+    match /leaveRequests/{requestId} {
+      allow get: if isValidId(requestId) && (isOwner(existing().uid) || isAdmin());
+      allow list: if isAdminEmail() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isValidId(requestId) && isSignedIn()
+        && isValidLeaveCreate(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().status == 'pending'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/employees/$(request.auth.uid));
+      allow update: if isValidId(requestId) && isSignedIn()
+        && isValidLeaveUpdate(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isAdmin()
+            && incoming().status in ['approved', 'rejected']
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewerUid', 'reviewerNote', 'updatedAt'])
+          )
+          || (
+            isOwner(existing().uid)
+            && existing().status == 'pending'
+            && incoming().status == 'pending'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['type', 'startDate', 'endDate', 'reason', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(requestId) && (isAdmin() || (isOwner(existing().uid) && existing().status == 'pending'));
+    }
+  }
+}
